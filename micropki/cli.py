@@ -18,9 +18,9 @@ def get_passphrase(path: str) -> bytes:
     return passphrase
 
 def main():
-    parser = argparse.ArgumentParser(description="MicroPKI - Minimal Public Key Infrastructure Tool")
+    parser = argparse.ArgumentParser()
     
-    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+    subparsers = parser.add_subparsers(dest="command")
 
     init_parser = subparsers.add_parser("init-ca", help="Initialize Root CA")
     init_parser.add_argument("--out-dir", type=str, default="./pki_data", help="Output directory for CA files")
@@ -30,6 +30,8 @@ def main():
                              help="Certificate validity in days (default: 3650)")
     init_parser.add_argument("--passphrase-file", type=str, required=True, 
                              help="Path to file containing encryption passphrase for private key")
+    init_parser.add_argument("--key-type", choices=['rsa','ecc'], default="rsa",
+                             help="Key generation (rsa - 4069, ecc - 384)")
     
     args = parser.parse_args()
     
@@ -37,7 +39,7 @@ def main():
         try:
             passphrase = get_passphrase(args.passphrase_file)
             ca = RootCA(args.out_dir)
-            ca.initialize(subject=args.subject, passphrase=passphrase, validity_days=args.validity_days)
+            ca.initialize(subject=args.subject, key_type=args.key_type, passphrase=passphrase, validity_days=args.validity_days)
             print(f"Root CA successfully initialized at {args.out_dir}")
             sys.exit(0)
         except Exception as e:

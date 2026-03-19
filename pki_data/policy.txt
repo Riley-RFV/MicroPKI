@@ -1,2 +1,16 @@
 Certificate Policy Document
+*******************************************
 Version: 1.0
+Generated: 2026-03-17 16:05:40
+
+CA Information
+--------------
+CA Name:      Local Test CA
+Certificate Serial Number:    0x6c7e99e4ebd54107145df8d34a45d6fbaab65e51
+Key Algorithm:    RSA-4096
+Validity Period:  2026-03-17 to 2031-05-05
+Valid Days:       1875
+
+Certificate Usage
+-----------------
+Root CA for MicroPKI demonstration!!!
