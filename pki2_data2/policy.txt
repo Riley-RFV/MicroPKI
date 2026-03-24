@@ -1,15 +1,15 @@
 Certificate Policy Document
 *******************************************
 Version: 1.0
-Generated: 2026-03-17 16:06:49
+Generated: 2026-03-24 18:04:33
 
 CA Information
 --------------
 CA Name:      Local Test CA
-Certificate Serial Number:    0x6927cb40831eeb5285f33bc3916fd2e90d82a65e
-Key Algorithm:    ECC-P384
-Validity Period:  2026-03-17 to 2033-08-07
-Valid Days:       2700
+Certificate Serial Number:    0x6aef9da139b1bf41209b2b0d946c837ad8f7246d
+Key Algorithm:    RSA-4096
+Validity Period:  2026-03-24 to 2031-05-12
+Valid Days:       1875
 
 Certificate Usage
 -----------------

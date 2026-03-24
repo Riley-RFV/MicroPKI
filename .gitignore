@@ -12,3 +12,5 @@ private/
 ca.db
 ca.serial
 audit.log
+*.log
+logs/

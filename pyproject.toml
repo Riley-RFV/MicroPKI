@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "micropki"
+version = "0.1.0"
+description = "A minimal PKI implementation"
+requires-python = ">=3.9"
+dependencies = [
+    "cryptography>=41.0.0",
+    "pytest>=7.0.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["micropki*"]

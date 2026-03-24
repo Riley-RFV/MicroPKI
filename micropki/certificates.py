@@ -8,8 +8,13 @@ from cryptography.x509.oid import NameOID, ExtensionOID
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import rsa, ec
 from cryptography.hazmat.backends import default_backend
+import logging
+from .logger import setup_logger, log_event
+
+logger = setup_logger()
 
 def parse_subject_dn(dn_string: str) -> x509.Name:
+    log_event(logger, logging.INFO, "Parsing Subject DN", input_dn=dn_string)
     attributes = []
 
     if dn_string.startswith('/'):
@@ -40,7 +45,11 @@ def parse_subject_dn(dn_string: str) -> x509.Name:
         
         if key in oid_map:
             attributes.append(x509.NameAttribute(oid_map[key], value))
-            
+        if not attributes:
+            log_event(logger, logging.WARNING, "No valid DN attributes was found", input_dn=dn_string)
+            raise ValueError("No valid DN attributes was found in subject string")
+
+    log_event(logger, logging.INFO, "Subject DN parsing is successfull", attributes_count=len(attributes))
     return x509.Name(attributes)
 
 def compute_skid(pub_key) -> bytes:
@@ -49,17 +58,20 @@ def compute_skid(pub_key) -> bytes:
     return hashlib.sha1(der_bytes).digest()
 
 def create_rootca_cert(private_key: rsa.RSAPrivateKey, subject_dn: str, validity_days: int = 3650) -> x509.Certificate:
+    log_event(logger, logging.INFO, "Building Root CA certificate", validity_days=validity_days)
     subject = parse_subject_dn(subject_dn)
-    issuer = subject  # Self-signed
+    issuer = subject
     
     now = datetime.now(timezone.utc)
     not_before = now
     not_after = now + timedelta(days=validity_days)
     serial_number = x509.random_serial_number()
-
+    log_event(logger, logging.INFO, "Certificate details prepared", serial_number=hex(serial_number),
+              not_before=not_before.isoformat(), not_after=not_after.isoformat())
     builder = (x509.CertificateBuilder().subject_name(subject).issuer_name(issuer).public_key(private_key.public_key()).serial_number(serial_number).not_valid_before(not_before).not_valid_after(not_after))
 
     builder = builder.add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+    log_event(logger, logging.INFO, "Extension is added: BasicConstraints (CA=True)")
     
     builder = builder.add_extension(x509.KeyUsage(digital_signature=True, 
                                                   content_commitment=False, 
@@ -70,12 +82,20 @@ def create_rootca_cert(private_key: rsa.RSAPrivateKey, subject_dn: str, validity
                                                   crl_sign=True,
                                                   encipher_only=False,
                                                   decipher_only=False), critical=True)
+    log_event(logger, logging.INFO, "Added extension: KeyUsage")
     skid = compute_skid(private_key.public_key())
     builder = builder.add_extension(x509.SubjectKeyIdentifier.from_public_key(private_key.public_key()), critical=False)
+    log_event(logger, logging.INFO, "Added extension: SubjectKeyIdentifier")
     
     builder = builder.add_extension(x509.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(
         x509.SubjectKeyIdentifier.from_public_key(private_key.public_key())), critical=False)
+    log_event(logger, logging.INFO, "Added extension: AuthorityKeyIdentifier")
     
-    certificate = builder.sign(private_key=private_key, algorithm=hashes.SHA256(), backend=default_backend())
-    
-    return certificate
+    try:
+        certificate = builder.sign(private_key=private_key, algorithm=hashes.SHA384(), backend=default_backend())
+        log_event(logger, logging.INFO, "Certificate signed successfully", serial_number=hex(serial_number))
+        return certificate
+
+    except Exception as e:
+        log_event(logger, logging.ERROR, "Failed to sign certificate", error=str(e))
+        raise e
