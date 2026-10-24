@@ -1,14 +1,16 @@
 import os
-from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.asymmetric import rsa, ec, padding
 from cryptography.hazmat.backends import default_backend
 from pathlib import Path
 from typing import Optional
 from .crypto_utils import (gen_rsa_key, enc_pvt_key, save_file, setup_dirs, keygen, policy)
 from .certificates import create_rootca_cert
 import logging
-from .logger import setup_logger, log_event
+from .logger import log_event
+from datetime import timezone
 
-logger = setup_logger()
+logger = logging.getLogger("pki_audit")
 
 class RootCA:
     def __init__(self, out_dir: str):

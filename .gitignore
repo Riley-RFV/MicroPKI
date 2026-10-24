@@ -14,3 +14,5 @@ ca.serial
 audit.log
 *.log
 logs/
+*.pass
+pki*/

@@ -8,9 +8,9 @@ from cryptography.hazmat.primitives.asymmetric import rsa, ec
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend
 import logging
-from .logger import setup_logger, log_event
+from .logger import log_event
 
-logger= setup_logger()
+logger = logging.getLogger("pki_audit")
 
 def gen_rsa_key(key_size) -> rsa.RSAPrivateKey:
     log_event(logger, logging.INFO, "Generating RSA private key", key_size=key_size)
@@ -22,16 +22,16 @@ def gen_rsa_key(key_size) -> rsa.RSAPrivateKey:
         log_event(logger, logging.ERROR, "Failed to generate RSA key", error=str(e))
         raise e
 
-def gen_ecc_key(ccurve) -> ec.EllipticCurvePrivateKey:
+def gen_ecc_key(curve: ec.EllipticCurve) -> ec.EllipticCurvePrivateKey:
     log_event(logger, logging.INFO, "Generating ECC private key")
     try:
-        key = ec.generate_private_key(ccurve, backend=default_backend())
+        key = ec.generate_private_key(curve, backend=default_backend())
         return key
     except Exception as e:
         log_event(logger, logging.ERROR, "Failed to generate ECC key", error=str(e))
         raise e
 
-def enc_pvt_key(key: rsa.RSAPrivateKey | ec.EllipticPrivateKey, passphrase: bytes) -> bytes:
+def enc_pvt_key(key: rsa.RSAPrivateKey | ec.EllipticCurvePrivateKey, passphrase: bytes) -> bytes:
     log_event(logger, logging.INFO, "Encrypting private key with passphrase")
     try:
         pem = key.private_bytes(encoding=serialization.Encoding.PEM, format=serialization.PrivateFormat.PKCS8,
@@ -50,7 +50,7 @@ def keygen(key_type="rsa", key_size=4096):
         return gen_ecc_key(ec.SECP384R1())
     else:
         log_event(logger, logging.ERROR, "Unsupported key_type or key_size requested", key_type=key_type)
-        raise ValueError("Unappropriate key_type or key_size: type -- {key_type}, size -- {key_size}")
+        raise ValueError(f"Unappropriate key_type or key_size: type -- {key_type}, size -- {key_size}")
 
 def save_file(path: Path, data: bytes, file_mode: int = 0o600):
     supports_unix_permissions = hasattr(os, 'chmod') and os.name != 'nt'
