@@ -1,11 +1,8 @@
-import os
 import hashlib
 from datetime import datetime, timezone, timedelta
-from typing import Optional
-import cryptography
 from cryptography.hazmat.primitives import serialization
 from cryptography import x509
-from cryptography.x509.oid import NameOID, ExtensionOID
+from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import rsa, ec
 from cryptography.hazmat.backends import default_backend
@@ -67,10 +64,6 @@ def parse_subject_dn(dn_string: str) -> x509.Name:
     log_event(logger, logging.INFO, "Subject DN parsing is successful",
               attributes_count=len(attributes))
     return x509.Name(attributes)
-def compute_skid(pub_key) -> bytes:
-    der_bytes = pub_key.public_bytes(encoding=serialization.Encoding.DER, 
-                                  format=serialization.PublicFormat.SubjectPublicKeyInfo)
-    return hashlib.sha1(der_bytes).digest()
 
 def create_rootca_cert(private_key: rsa.RSAPrivateKey, subject_dn: str, validity_days: int = 3650) -> private_key:
     log_event(logger, logging.INFO, "Building Root CA certificate", validity_days=validity_days)
@@ -98,7 +91,6 @@ def create_rootca_cert(private_key: rsa.RSAPrivateKey, subject_dn: str, validity
                                                   encipher_only=False,
                                                   decipher_only=False), critical=True)
     log_event(logger, logging.INFO, "Added extension: KeyUsage")
-    skid = compute_skid(private_key.public_key())
     builder = builder.add_extension(x509.SubjectKeyIdentifier.from_public_key(private_key.public_key()), critical=False)
     log_event(logger, logging.INFO, "Added extension: SubjectKeyIdentifier")
     

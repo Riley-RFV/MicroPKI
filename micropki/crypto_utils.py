@@ -1,9 +1,7 @@
 import os
-import stat
 import warnings
 from pathlib import Path
 from datetime import datetime
-from typing import Optional
 from cryptography.hazmat.primitives.asymmetric import rsa, ec
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend
@@ -18,7 +16,7 @@ def gen_rsa_key(key_size) -> rsa.RSAPrivateKey:
         key = rsa.generate_private_key(public_exponent=65537, key_size=key_size, backend=default_backend())
         log_event(logger, logging.INFO, "RSA private key generation is successful", key_size=key_size)
         return key
-    except Exeption as e:
+    except Exception as e:
         log_event(logger, logging.ERROR, "Failed to generate RSA key", error=str(e))
         raise e
 
@@ -119,3 +117,60 @@ Root CA for MicroPKI demonstration!!!
     except Exception as e:
         log_event(logger, logging.ERROR, "Failed to write policy document", error=str(e))
         raise e
+
+
+def gen_leaf_key(key_type: str = "rsa"):
+    log_event(logger, logging.INFO, "Generating leaf key", key_type=key_type)
+    if key_type == "rsa":
+        return gen_rsa_key(2048)
+    if key_type == "ecc":
+        return gen_ecc_key(ec.SECP256R1())
+    raise ValueError(f"Unsupported key type for leaf: {key_type!r}")
+
+def save_unencrypted_key(path: Path, key) -> None:
+    pem = key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    save_file(path, pem, file_mode=0o600)
+    log_event(logger, logging.WARNING,
+              "Leaf private key stored UNENCRYPTED (PKCS#8, no passphrase)",
+              path=str(path))
+
+def load_encrypted_key(path: Path, passphrase: bytes):
+    if not path.exists():
+        raise FileNotFoundError(f"Private key not found: {path}")
+    data = path.read_bytes()
+    key = serialization.load_pem_private_key(data, password=passphrase,
+                                             backend=default_backend())
+    log_event(logger, logging.INFO, "Encrypted private key loaded", path=str(path))
+    return key
+
+def append_intermediate_policy(policy_path: Path, *, subject: str, serial: str,
+                               date_bf: datetime, date_af: datetime,
+                               key_type: str, key_size: int,
+                               pathlen: int, issuer: str) -> None:
+    key_info = f"RSA-{key_size}" if key_type.upper() == "RSA" else f"ECC-P{key_size}"
+    section = f"""
+Intermediate CA Information
+---------------------------
+Subject DN:          {subject}
+Serial Number:       {serial}
+Issuer DN:           {issuer}
+Key Algorithm:       {key_info}
+Validity Period:     {date_bf.strftime('%Y-%m-%d')} to {date_af.strftime('%Y-%m-%d')}
+Path Length Constraint: {pathlen}
+"""
+    try:
+        with open(policy_path, "a", encoding="utf-8") as f:
+            f.write(section)
+        log_event(logger, logging.INFO, "Intermediate CA section appended to policy",
+                  path=str(policy_path))
+    except Exception as e:
+        log_event(logger, logging.ERROR, "Failed to update policy document", error=str(e))
+        raise
+
+def load_certificate(path: Path) -> "x509.Certificate":
+    from cryptography import x509 as _x509
+    return _x509.load_pem_x509_certificate(path.read_bytes(), default_backend())

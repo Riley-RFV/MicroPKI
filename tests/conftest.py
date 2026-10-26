@@ -6,10 +6,14 @@ import os
 import sys
 import warnings
 
+
 warnings.filterwarnings("ignore", category=RuntimeWarning, module="runpy")
 
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
+sys.path.insert(0, str(Path(__file__).parent))
+
+from s2_fixt import root_ca, intermediate
 
 @pytest.fixture
 def temp_dir():
@@ -36,7 +40,7 @@ def non_existent_file(temp_dir):
 @pytest.fixture
 def unwritable_dir():
     if os.name == 'nt':
-        pytest.skip("Unix permissions test skipped on Windows")
+      pytest.skip("Unix permissions test skipped on Windows")
     
     dirpath = tempfile.mkdtemp()
     os.chmod(dirpath, 0o444)

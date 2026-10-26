@@ -15,7 +15,7 @@ def test_rsa_key_gen():
 def test_ecc_key_gen():
     from micropki.crypto_utils import gen_ecc_key
     
-    key = gen_ecc_key(ccurve=ec.SECP384R1())
+    key = gen_ecc_key(curve=ec.SECP384R1())
     
     assert isinstance(key, ec.EllipticCurvePrivateKey)
     assert key.curve.key_size == 384
@@ -62,10 +62,12 @@ def test_key_enc_dec(temp_dir):
     assert decrypted_key is not None
 
 def test_log(temp_dir):
-    from micropki.logger import setup_logger
-    import os
-    
+    from micropki.logger import setup_logger, log_event
+    import logging
+
     log_path = temp_dir / "test_audit.log"
-    logger = setup_logger(str(log_path))
-    
-    assert log_path.exists() or logger.handlers[0].baseFilename
+    logger = setup_logger(log_path=str(log_path))
+    log_event(logger, logging.INFO, "test message")
+
+    assert log_path.exists()
+    assert "test message" in log_path.read_text()
