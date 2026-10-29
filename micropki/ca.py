@@ -11,7 +11,8 @@ from cryptography.x509.oid import NameOID
 from .templates import build_template_extensions
 from .csr import build_intermediate_csr, sign_intermediate_csr, signature_algorithm_for
 from pathlib import Path
-
+from .database import connect, insert_certificate
+from .serial import generate_serial, to_hex
 
 logger = logging.getLogger("pki_audit")
 
@@ -89,25 +90,46 @@ class RootCA:
             raise e
 
 
-    def issue_intermediate(self, *, root_cert_path: str, root_key_path: str,
-                           root_passphrase: bytes, subject: str, key_type: str,
-                           key_size: int, passphrase: bytes,
-                           validity_days: int, pathlen: int) -> x509.Certificate:
+    def issue_intermediate(self, *, root_cert_path: str, root_key_path: str, root_passphrase: bytes, subject: str, key_type: str,
+                           key_size: int, passphrase: bytes, validity_days: int, pathlen: int, db_path: str |Path = "./pki/micropki.db") -> x509.Certificate:
 
         root_cert = load_certificate(Path(root_cert_path))
         root_key = load_encrypted_key(Path(root_key_path), root_passphrase)
 
         intermediate_key = keygen(key_type=key_type, key_size=key_size)
         csr = build_intermediate_csr(subject, intermediate_key, pathlen)
-        cert = sign_intermediate_csr(csr, root_cert, root_key, validity_days, pathlen)
-
-        enc_key = enc_pvt_key(intermediate_key, passphrase)
         key_path = self.pvt_dir / "intermediate.key.pem"
         cert_path = self.certs_dir / "intermediate.cert.pem"
-        self.pvt_dir.mkdir(parents=True, exist_ok=True)
-        self.certs_dir.mkdir(parents=True, exist_ok=True)
-        save_file(key_path, enc_key, file_mode=0o600)
-        save_file(cert_path, cert.public_bytes(serialization.Encoding.PEM), file_mode=0o644)
+
+        conn = connect(db_path)
+        try:
+            serial_int = generate_serial(conn)
+            cert = sign_intermediate_csr(csr, root_cert, root_key,
+                                         validity_days, pathlen,
+                                         serial_number=serial_int)
+            insert_certificate(
+                conn,
+                serial_hex=to_hex(serial_int),
+                subject=cert.subject.rfc4514_string(),
+                issuer=cert.issuer.rfc4514_string(),
+                not_before=cert.not_valid_before_utc.isoformat(),
+                not_after=cert.not_valid_after_utc.isoformat(),
+                cert_pem=cert.public_bytes(serialization.Encoding.PEM).decode(),
+            )
+            try:
+                enc_key = enc_pvt_key(intermediate_key, passphrase)
+                self.pvt_dir.mkdir(parents=True, exist_ok=True)
+                self.certs_dir.mkdir(parents=True, exist_ok=True)
+                save_file(key_path, enc_key, file_mode=0o600)
+                save_file(cert_path, cert.public_bytes(serialization.Encoding.PEM),
+                          file_mode=0o644)
+            except Exception:
+                conn.execute("DELETE FROM certificates WHERE serial_hex = ?",
+                             (to_hex(serial_int),))
+                conn.commit()
+                raise
+        finally:
+            conn.close()
 
         append_intermediate_policy(
             self.policy_path,
@@ -119,13 +141,12 @@ class RootCA:
             pathlen=pathlen, issuer=root_cert.subject.rfc4514_string(),
         )
         log_event(logger, logging.INFO, "Intermediate CA issued",
-                  cert_path=str(cert_path), key_path=str(key_path))
+                  cert_path=str(cert_path), key_path=str(key_path),
+                  db_path=str(db_path))
         return cert
 
-    def issue_cert(self, *, ca_cert_path: str, ca_key_path: str, ca_passphrase: bytes,
-                   template: str, subject: str, sans: list[str],
-                   out_dir: str, validity_days: int, key_type: str = "rsa",
-                   csr_path: str | None = None) -> x509.Certificate:
+    def issue_cert(self, *, ca_cert_path: str, ca_key_path: str, ca_passphrase: bytes, template: str, subject: str, sans: list[str],out_dir: str,
+                   validity_days: int, key_type: str = "rsa", csr_path: str | None = None, db_path: str | Path = "./pki/micropki.db") -> x509.Certificate:
 
         ca_cert = load_certificate(Path(ca_cert_path))
         ca_key = load_encrypted_key(Path(ca_key_path), ca_passphrase)
@@ -147,46 +168,68 @@ class RootCA:
             log_event(logger, logging.INFO, "Generated leaf key",
                       key_type=key_type)
 
-        now = datetime.now(timezone.utc)
-        builder = (
-            x509.CertificateBuilder()
-            .subject_name(subject_dn)
-            .issuer_name(ca_cert.subject)
-            .public_key(leaf_pub)
-            .serial_number(x509.random_serial_number())
-            .not_valid_before(now)
-            .not_valid_after(now + timedelta(days=validity_days))
-        )
-        for ext, critical in build_template_extensions(template, leaf_key, sans):
-            builder = builder.add_extension(ext, critical=critical)
-        builder = builder.add_extension(
-            x509.SubjectKeyIdentifier.from_public_key(leaf_pub), critical=False)
-        try:
-            ca_ski = ca_cert.extensions.get_extension_for_class(
-                x509.SubjectKeyIdentifier).value
-            builder = builder.add_extension(
-                x509.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(ca_ski),
-                critical=False)
-        except x509.ExtensionNotFound:
-            log_event(logger, logging.WARNING,
-                      "Intermediate CA certificate has no SKI; AKI skipped",
-                      ca_cert=str(ca_cert_path))
-
-        cert = builder.sign(private_key=ca_key,
-                            algorithm=signature_algorithm_for(ca_key),
-                            backend=default_backend())
-
         out = Path(out_dir).expanduser()
         out.mkdir(parents=True, exist_ok=True)
         cn = _cn_from_dn(subject_dn)
         cert_path = out / f"{cn}.cert.pem"
-        save_file(cert_path, cert.public_bytes(serialization.Encoding.PEM), file_mode=0o644)
+        key_path = out / f"{cn}.key.pem"
 
-        if leaf_key is not None:
-            key_path = out / f"{cn}.key.pem"
-            save_unencrypted_key(key_path, leaf_key)
+        conn = connect(db_path)
+        try:
+            serial_int = generate_serial(conn)
+            now = datetime.now(timezone.utc)
+            builder = (
+                x509.CertificateBuilder()
+                .subject_name(subject_dn)
+                .issuer_name(ca_cert.subject)
+                .public_key(leaf_pub)
+                .serial_number(serial_int)
+                .not_valid_before(now)
+                .not_valid_after(now + timedelta(days=validity_days))
+            )
+            for ext, critical in build_template_extensions(template, leaf_pub, sans):
+                builder = builder.add_extension(ext, critical=critical)
+            builder = builder.add_extension(
+                x509.SubjectKeyIdentifier.from_public_key(leaf_pub), critical=False)
+            try:
+                ca_ski = ca_cert.extensions.get_extension_for_class(
+                    x509.SubjectKeyIdentifier).value
+                builder = builder.add_extension(
+                    x509.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(ca_ski),
+                    critical=False)
+            except x509.ExtensionNotFound:
+                log_event(logger, logging.WARNING,
+                          "Intermediate CA certificate has no SKI; AKI skipped",
+                          ca_cert=str(ca_cert_path))
+
+            cert = builder.sign(private_key=ca_key,
+                                algorithm=signature_algorithm_for(ca_key),
+                                backend=default_backend())
+
+            insert_certificate(
+                conn,
+                serial_hex=to_hex(serial_int),
+                subject=cert.subject.rfc4514_string(),
+                issuer=cert.issuer.rfc4514_string(),
+                not_before=cert.not_valid_before_utc.isoformat(),
+                not_after=cert.not_valid_after_utc.isoformat(),
+                cert_pem=cert.public_bytes(serialization.Encoding.PEM).decode(),
+            )
+            try:
+                save_file(cert_path, cert.public_bytes(serialization.Encoding.PEM),
+                          file_mode=0o644)
+                if leaf_key is not None:
+                    save_unencrypted_key(key_path, leaf_key)
+            except Exception:
+                conn.execute("DELETE FROM certificates WHERE serial_hex = ?",
+                             (to_hex(serial_int),))
+                conn.commit()
+                raise
+        finally:
+            conn.close()
 
         log_event(logger, logging.INFO, "Leaf certificate issued",
                   template=template, subject=subject_dn.rfc4514_string(),
-                  sans=sans, serial=hex(cert.serial_number), cert_path=str(cert_path))
+                  sans=sans, serial=hex(cert.serial_number),
+                  cert_path=str(cert_path), db_path=str(db_path))
         return cert

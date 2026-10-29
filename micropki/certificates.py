@@ -8,6 +8,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa, ec
 from cryptography.hazmat.backends import default_backend
 import logging
 from .logger import log_event
+from .serial import generate_serial
 
 logger = logging.getLogger("pki_audit")
 OID_MAP = {
@@ -65,7 +66,7 @@ def parse_subject_dn(dn_string: str) -> x509.Name:
               attributes_count=len(attributes))
     return x509.Name(attributes)
 
-def create_rootca_cert(private_key: rsa.RSAPrivateKey, subject_dn: str, validity_days: int = 3650) -> private_key:
+def create_rootca_cert(private_key: rsa.RSAPrivateKey, subject_dn: str, validity_days: int = 3650, serial_number: int | None = None) -> x509.Certificate:
     log_event(logger, logging.INFO, "Building Root CA certificate", validity_days=validity_days)
     subject = parse_subject_dn(subject_dn)
     issuer = subject
@@ -73,7 +74,8 @@ def create_rootca_cert(private_key: rsa.RSAPrivateKey, subject_dn: str, validity
     now = datetime.now(timezone.utc)
     not_before = now
     not_after = now + timedelta(days=validity_days)
-    serial_number = x509.random_serial_number()
+    if serial_number is None:
+      serial_number=generate_serial()
     log_event(logger, logging.INFO, "Certificate details prepared", serial_number=hex(serial_number),
               not_before=not_before.isoformat(), not_after=not_after.isoformat())
     builder = (x509.CertificateBuilder().subject_name(subject).issuer_name(issuer).public_key(private_key.public_key()).serial_number(serial_number).not_valid_before(not_before).not_valid_after(not_after))

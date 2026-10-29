@@ -4,6 +4,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, ec
 from cryptography.hazmat.backends import default_backend
+from .serial import generate_serial
 
 from .certificates import parse_subject_dn
 from .logger import log_event
@@ -33,16 +34,14 @@ def build_intermediate_csr(subject: str, private_key, pathlen: int) -> x509.Cert
               subject=dn.rfc4514_string())
     return csr
 
-def sign_intermediate_csr(csr: x509.CertificateSigningRequest,
-                          root_cert: x509.Certificate,
-                          root_key,
-                          validity_days: int,
-                          pathlen: int) -> x509.Certificate:
+def sign_intermediate_csr(csr, root_cert, root_key, validity_days: int, pathlen: int, serial_number: int | None = None) -> x509.Certificate:
     if not csr.is_signature_valid:
         raise ValueError("CSR signature is invalid")
 
     now = datetime.now(timezone.utc)
-    serial = x509.random_serial_number()
+    if serial_number is None:
+      serial_number = generate_serial()
+    serial = serial_number
     intermediate_pub = csr.public_key()
 
     try:

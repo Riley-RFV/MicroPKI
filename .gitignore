@@ -8,7 +8,15 @@ venv/
 *.pem
 *.p12
 *.pfx
+
 private/
+secrets/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+pki/micropki.db
+pki_data/micropki.db
 ca.db
 ca.serial
 audit.log
@@ -16,3 +24,5 @@ audit.log
 logs/
 *.pass
 pki*/
+pki/
+pki_data/
