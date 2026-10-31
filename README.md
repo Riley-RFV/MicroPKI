@@ -15,10 +15,12 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 ## How to start
-**1) Initialize Root CA**
+**1) Initialize Root CA and Database**
 ```bash
 mkdir -p secrets
 echo "my-cool-passphrase" > secrets/root.pass
+
+python -m micropki.cli db init --db-path ./pki/micropki.db
 
 python -m micropki.cli ca init \
   --subject "CN=Test Root CA,O=TestOrg,C=RU" \
@@ -44,6 +46,7 @@ python -m micropki.cli ca issue-intermediate \
   --out-dir ./pki \
   --validity-days 1825 \
   --pathlen 0 \
+  --db-path ./pki/micropki.db \
   --log-file ./pki/ca.log
 ```
 **3) Issue certificates**
@@ -60,6 +63,7 @@ python -m micropki.cli ca issue-cert \
   --san ip:192.168.1.10 \
   --out-dir ./pki/certs \
   --validity-days 612 \
+  --db-path ./pki/micropki.db \
   --log-file ./pki/ca.log
     
 #Client certificate (email:)
@@ -72,6 +76,7 @@ python -m micropki.cli ca issue-cert \
   --san email:IIvan0ff@example.com \
   --out-dir ./pki/certs \
   --validity-days 613 \
+  --db-path ./pki/micropki.db \
   --log-file ./pki/ca.log
 
 #Code signing (only dns: or uri:)
@@ -83,7 +88,39 @@ python -m micropki.cli ca issue-cert \
   --subject "CN=Code Signer" \
   --out-dir ./pki/certs \
   --validity-days 306 \
+  --db-path ./pki/micropki.db \
   --log-file ./pki/ca.log
+```
+**4) Query certificates**
+```bash
+## List all certificates
+python -m micropki.cli ca list-certs --db-path ./pki/micropki.db
+
+## Filter status
+python -m micropki.cli ca list-certs --status valid --format table
+
+## Export in JSON, CSV or table format
+python -m micropki.cli ca list-certs --format table
+python -m micropki.cli ca list-certs --format json
+python -m micropki.cli ca list-certs --format csv
+
+## Show certificate by its serial
+python -m micropki.cli ca show-cert <insert serial> --db-path ./pki/micropki.db
+```
+**5) Start repository server**
+```bash
+python -m micropki.cli repo serve --port 8080 --db-path ./pki/micropki.db --cert-dir ./pki/certs --log-file ./pki/repo.log
+```
+Endpoints:
+```bash
+## Root CA
+curl -s http://localhost:8080/ca/root
+##Intermediate CA
+curl -s http://localhost:8080/ca/intermediate
+##Certificate by serial
+curl -s http://localhost:8080/certificate/<insert serial>
+##CRL placeholder (returns code 501)
+curl -s http://localhost:8080/crl
 ```
 ## Running Tests
 ```bash
