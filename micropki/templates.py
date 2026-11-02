@@ -3,13 +3,12 @@ from typing import Iterable
 from cryptography import x509
 from cryptography.x509.oid import ExtendedKeyUsageOID
 from cryptography.hazmat.primitives.asymmetric import rsa, ec
-
 from .logger import log_event
 from .san import parse_san
 
 logger = logging.getLogger("pki_audit")
 
-VALID_TEMPLATES = {"server", "client", "code_signing"}
+VALID_TEMPLATES = {"server", "client", "code_signing", "ocsp"}
 
 def _basic_constraints_leaf() -> x509.BasicConstraints:
     return x509.BasicConstraints(ca=False, path_length=None)
@@ -41,6 +40,18 @@ def _key_usage_for(template: str, key) -> x509.KeyUsage:
         )
     return x509.KeyUsage(digital_signature=True, key_encipherment=False, **common)
 
+def _key_usage_for_ocsp() -> x509.KeyUsage:
+    return x509.KeyUsage(
+        digital_signature=True,
+        content_commitment=False,
+        key_encipherment=False,
+        data_encipherment=False,
+        key_agreement=False,
+        key_cert_sign=False,
+        crl_sign=False,
+        encipher_only=False,
+        decipher_only=False,
+    )
 
 def build_template_extensions(template: str, key, sans: list[str]) -> list[tuple[x509.ExtensionType, bool]]:
     if template not in VALID_TEMPLATES:
@@ -70,3 +81,23 @@ def build_template_extensions(template: str, key, sans: list[str]) -> list[tuple
     log_event(logger, logging.INFO, "Template extensions built",
               template=template, extensions=[type(e).__name__ for e, _ in extensions])
     return extensions
+
+def build_ocsp_cert_extensions(key, sans: list[str]):
+    exts = [
+        (x509.BasicConstraints(ca=False, path_length=None), True),
+        (_key_usage_for_ocsp(), True),
+        (x509.ExtendedKeyUsage([ExtendedKeyUsageOID.OCSP_SIGNING]), False),
+    ]
+    if sans:
+        gn = []
+        for raw in sans:
+            kind, value = raw.split(":", 1)
+            kind = kind.strip().lower()
+            if kind == "dns":
+                gn.append(x509.DNSName(value))
+            elif kind == "uri":
+                gn.append(x509.UniformResourceIdentifier(value))
+            else:
+                raise ValueError(f"OCSP cert SAN must be dns: or uri:, got {raw!r}")
+        exts.append((x509.SubjectAlternativeName(gn), False))
+    return exts

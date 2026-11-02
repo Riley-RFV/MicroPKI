@@ -3,10 +3,12 @@ import re
 import socket
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
-
+from urllib.parse import urlparse, parse_qs
 from .database import connect, get_certificate_by_serial
 from .logger import log_event
+import email.utils
+import hashlib
+import time
 
 logger = logging.getLogger("pki_audit")
 
@@ -42,9 +44,10 @@ def make_handler(db_path: Path, cert_dir: Path):
             if path == "/ca/intermediate":
                 return self._ca("intermediate.cert.pem")
             if path == "/crl":
-                return self._send(501,
-                                  b"CRL generation is not implemented yet\n",
-                                  "text/plain")
+              return self._crl(parse_qs(urlparse(self.path).query))
+            if path.startswith("/crl/") and path.endswith(".crl"):
+              label = path[len("/crl/"):-len(".crl")]
+              return self._crl({"ca": [label]})
             return self._send(404, b"Not found\n", "text/plain")
 
         def _cert(self, serial: str):
@@ -67,6 +70,33 @@ def make_handler(db_path: Path, cert_dir: Path):
 
         def _method_not_allowed(self):
             self._send(405, b"Method not allowed\n", "text/plain")
+
+        def _crl(self, query: dict):
+            ca = (query.get("ca", [None])[0] or "intermediate").lower()
+            if ca not in ("root", "intermediate"):
+                return self._send(400, b"Unknown CA (expected root|intermediate)\n",
+                                  "text/plain")
+            crl_path = cert_dir.parent / "crl" / f"{ca}.crl.pem"
+            if not crl_path.is_file():
+                return self._send(404, b"CRL not found\n", "text/plain")
+
+            body = crl_path.read_bytes()
+            stat = crl_path.stat()
+            etag = '"' + hashlib.sha256(body).hexdigest()[:32] + '"'
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/pkix-crl")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Last-Modified",
+                             email.utils.formatdate(stat.st_mtime, usegmt=True))
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", "max-age=3600")
+            self.end_headers()
+            self.wfile.write(body)
+            log_event(logger, logging.INFO,
+                      f"[HTTP] {self.command} {self.path}",
+                      client=self.client_address[0], status=200)
 
         do_POST = do_PUT = do_DELETE = do_PATCH = _method_not_allowed
 

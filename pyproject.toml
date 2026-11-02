@@ -10,8 +10,12 @@ requires-python = ">=3.9"
 dependencies = [
     "cryptography>=42.0.0",
     "pytest>=7.0.0",
+    "asn1crypto>=1.5.1",
 ]
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["micropki*"]
+
+[project.scripts]
+micropki = "micropki.cli:main"

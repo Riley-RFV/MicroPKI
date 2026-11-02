@@ -24,8 +24,17 @@ CREATE TABLE IF NOT EXISTS certificates (
 );
 CREATE INDEX IF NOT EXISTS idx_certificates_serial ON certificates(serial_hex);
 CREATE INDEX IF NOT EXISTS idx_certificates_status ON certificates(status);
-"""
 
+CREATE TABLE IF NOT EXISTS crl_metadata (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ca_subject TEXT NOT NULL,
+    crl_number INTEGER NOT NULL,
+    last_generated TEXT NOT NULL,
+    next_update TEXT NOT NULL,
+    crl_path TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ca_subject ON crl_metadata(ca_subject);
+"""
 
 def init_db(db_path: str | Path) -> Path:
     path = Path(db_path).expanduser()
@@ -43,19 +52,16 @@ def init_db(db_path: str | Path) -> Path:
         conn.close()
     return path
 
-
 def connect(db_path: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(Path(db_path).expanduser()))
     conn.row_factory = sqlite3.Row
     return conn
-
 
 def serial_exists(conn: sqlite3.Connection, serial: int) -> bool:
     from .serial import to_hex
     cur = conn.execute("SELECT 1 FROM certificates WHERE serial_hex = ?",
                        (to_hex(serial),))
     return cur.fetchone() is not None
-
 
 def insert_certificate(conn: sqlite3.Connection, *, serial_hex: str, subject: str, issuer: str, not_before: str, not_after: str, cert_pem: str, 
                        status: str = "valid") -> None:
@@ -88,7 +94,6 @@ def get_certificate_by_serial(conn: sqlite3.Connection, serial_hex: str):
     )
     return cur.fetchone()
 
-
 def list_certificates(conn: sqlite3.Connection,
                       status: Optional[str] = None,
                       issuer: Optional[str] = None,
@@ -111,7 +116,6 @@ def list_certificates(conn: sqlite3.Connection,
     query += " ORDER BY id ASC"
     return conn.execute(query, params).fetchall()
 
-
 def update_status(conn: sqlite3.Connection, serial_hex: str, status: str,
                   reason: Optional[str] = None,
                   when: Optional[str] = None) -> None:
@@ -126,8 +130,18 @@ def update_status(conn: sqlite3.Connection, serial_hex: str, status: str,
     log_event(logger, logging.INFO, "Certificate status updated",
               serial=serial_hex, status=status, reason=reason)
 
-
 def list_revoked(conn: sqlite3.Connection):
     return conn.execute(
         "SELECT * FROM certificates WHERE status = 'revoked'"
     ).fetchall()
+
+def list_revoked_by_issuer(conn, issuer: str):
+    return conn.execute(
+        "SELECT * FROM certificates WHERE status = 'revoked' AND issuer = ?",
+        (issuer,),
+    ).fetchall()
+
+def get_crl_metadata(conn, ca_subject: str):
+    return conn.execute(
+        "SELECT * FROM crl_metadata WHERE ca_subject = ?", (ca_subject,)
+    ).fetchone()

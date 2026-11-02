@@ -5,6 +5,7 @@ A minimal representation of PKI (Public Key Infrastructure) utility based on Pyt
 - **Python**>=3.9
 - **cryptography**>=42.0.0
 - **pytest**>=7.0.0
+- **asn1crypto**>=1.5.1
 
 ## Installation
 ```bash

@@ -422,11 +422,6 @@ def test_repo_get_ca_intermediate(s3_repo_server, s3_intermediate):
     assert status == 200
     assert body == s3_intermediate["cert"].read_bytes()
 
-def test_repo_crl_returns_501(s3_repo_server):
-    status, body, _ = _http_get(f"{s3_repo_server}/crl")
-    assert status == 501
-    assert b"not implemented" in body.lower()
-
 def test_repo_bad_serial_400(s3_repo_server):
     status, _, _ = _http_get(f"{s3_repo_server}/certificate/XYZ")
     assert status == 400

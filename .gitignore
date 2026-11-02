@@ -26,3 +26,8 @@ logs/
 pki*/
 pki/
 pki_data/
+pki/crl/
+pki_data/crl/
+pki/ocsp/
+pki_data/ocsp/
+micropki.egg-info/

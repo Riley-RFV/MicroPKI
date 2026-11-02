@@ -8,7 +8,7 @@ from .logger import log_event
 from datetime import datetime, timezone, timedelta
 from cryptography import x509
 from cryptography.x509.oid import NameOID
-from .templates import build_template_extensions
+from .templates import build_template_extensions, build_ocsp_cert_extensions
 from .csr import build_intermediate_csr, sign_intermediate_csr, signature_algorithm_for
 from pathlib import Path
 from .database import connect, insert_certificate
@@ -232,4 +232,86 @@ class RootCA:
                   template=template, subject=subject_dn.rfc4514_string(),
                   sans=sans, serial=hex(cert.serial_number),
                   cert_path=str(cert_path), db_path=str(db_path))
+        return cert
+
+    def issue_ocsp_cert(self, *, ca_cert_path: str, ca_key_path: str,
+                        ca_passphrase: bytes, subject: str,
+                        key_type: str, key_size: int,
+                        sans: list[str], out_dir: str,
+                        validity_days: int = 365,
+                        db_path: str | Path = "./pki/micropki.db") -> x509.Certificate:
+
+        ca_cert = load_certificate(Path(ca_cert_path))
+        ca_key = load_encrypted_key(Path(ca_key_path), ca_passphrase)
+
+        if key_type == "rsa" and key_size < 2048:
+            raise ValueError("OCSP responder key: RSA must be >= 2048")
+        if key_type == "ecc" and key_size not in (256, 384):
+            raise ValueError("OCSP responder key: ECC must be P-256 or P-384")
+
+        leaf_key = gen_leaf_key(key_type)
+        leaf_pub = leaf_key.public_key()
+        subject_dn = parse_subject_dn(subject)
+
+        out = Path(out_dir).expanduser()
+        out.mkdir(parents=True, exist_ok=True)
+        cn = _cn_from_dn(subject_dn)
+        cert_path = out / f"{cn}.cert.pem"
+        key_path = out / f"{cn}.key.pem"
+
+        conn = connect(db_path)
+        try:
+            serial_int = generate_serial(conn)
+            now = datetime.now(timezone.utc)
+            builder = (
+                x509.CertificateBuilder()
+                .subject_name(subject_dn)
+                .issuer_name(ca_cert.subject)
+                .public_key(leaf_pub)
+                .serial_number(serial_int)
+                .not_valid_before(now)
+                .not_valid_after(now + timedelta(days=validity_days))
+            )
+            for ext, critical in build_ocsp_cert_extensions(leaf_pub, sans):
+                builder = builder.add_extension(ext, critical=critical)
+            builder = builder.add_extension(
+                x509.SubjectKeyIdentifier.from_public_key(leaf_pub), critical=False)
+            try:
+                ca_ski = ca_cert.extensions.get_extension_for_class(
+                    x509.SubjectKeyIdentifier).value
+                builder = builder.add_extension(
+                    x509.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(ca_ski),
+                    critical=False)
+            except x509.ExtensionNotFound:
+                pass
+
+            cert = builder.sign(private_key=ca_key,
+                                algorithm=signature_algorithm_for(ca_key),
+                                backend=default_backend())
+
+            insert_certificate(
+                conn,
+                serial_hex=to_hex(serial_int),
+                subject=cert.subject.rfc4514_string(),
+                issuer=cert.issuer.rfc4514_string(),
+                not_before=cert.not_valid_before_utc.isoformat(),
+                not_after=cert.not_valid_after_utc.isoformat(),
+                cert_pem=cert.public_bytes(serialization.Encoding.PEM).decode(),
+            )
+            try:
+                save_file(cert_path, cert.public_bytes(serialization.Encoding.PEM),
+                          file_mode=0o644)
+                save_unencrypted_key(key_path, leaf_key)
+            except Exception:
+                conn.execute("DELETE FROM certificates WHERE serial_hex = ?",
+                             (to_hex(serial_int),))
+                conn.commit()
+                raise
+        finally:
+            conn.close()
+
+        log_event(logger, logging.INFO, "OCSP responder certificate issued",
+                  subject=subject_dn.rfc4514_string(),
+                  serial=hex(cert.serial_number),
+                  cert_path=str(cert_path), key_path=str(key_path))
         return cert
