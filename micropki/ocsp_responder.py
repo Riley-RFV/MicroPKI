@@ -14,6 +14,7 @@ from .database import connect, get_certificate_by_serial
 from .logger import log_event
 from .ocsp import (parse_ocsp_request, match_issuer, build_ocsp_response, build_error_response)
 import traceback
+from .ratelimit import TokenBucket
 
 logger = logging.getLogger("pki_audit")
 
@@ -84,12 +85,15 @@ def _status_for_serial(db_path: Path, serial: int) -> dict:
 
 def make_handler(db_path: Path, responder_cert_path: Path,
                  responder_key_path: Path, ca_cert_path: Path,
-                 cache_ttl: int = 60):
+                 cache_ttl: int = 60,
+                 rate_limit: float = 0.0,
+                 rate_burst:  int = 10):
 
     responder_cert = _load_cert(responder_cert_path)
     responder_key = _load_key(responder_key_path)
     ca_cert = _load_cert(ca_cert_path)
     cache = _Cache(cache_ttl)
+    limiter = TokenBucket(rate_limit, rate_burst)
 
     root_cert = None
     root_path = ca_cert_path.parent / "ca.cert.pem"
@@ -114,12 +118,30 @@ def make_handler(db_path: Path, responder_cert_path: Path,
             self.end_headers()
             self.wfile.write(body)
 
+        def _check_limit(self) -> bool:
+            ip = self.client_address[0]
+            allowed, retry = limiter.allow(ip)
+            if not allowed:
+                self.send_response(429)
+                self.send_header("Retry-After", str(retry))
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                log_event(logger, logging.WARNING, "[HTTP] 429 rate limit",
+                          client=ip, path=self.path, retry_after=retry)
+                return False
+            return True
+
         def do_GET(self):
+            if not self._check_limit():
+                return
             if urlparse(self.path).path == "/":
                 return self._send(200, b"MicroPKI OCSP responder\n", "text/plain")
             return self._send(405, b"Method not allowed\n", "text/plain")
 
         def do_POST(self):
+            if not self._check_limit():
+                return
             started = time.time()
             path = urlparse(self.path).path
             if path not in ("/ocsp", "/"):
@@ -191,10 +213,14 @@ def make_handler(db_path: Path, responder_cert_path: Path,
 
 def serve(host: str, port: int, *, db_path: Path,
           responder_cert: Path, responder_key: Path,
-          ca_cert: Path, cache_ttl: int = 60) -> None:
+          ca_cert: Path, cache_ttl: int = 60,
+          rate_limit: float = 0.0,
+          rate_burst: int = 10) -> None:
     handler = make_handler(Path(db_path), Path(responder_cert),
                            Path(responder_key), Path(ca_cert),
-                           cache_ttl=cache_ttl)
+                           cache_ttl=cache_ttl,
+                           rate_limit=rate_limit,
+                           rate_burst=rate_burst)
     httpd = HTTPServer((host, port), handler)
     log_event(logger, logging.INFO, "OCSP responder started",
               host=host, port=port,

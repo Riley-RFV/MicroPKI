@@ -34,6 +34,15 @@ CREATE TABLE IF NOT EXISTS crl_metadata (
     crl_path TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ca_subject ON crl_metadata(ca_subject);
+
+CREATE TABLE IF NOT EXISTS compromised_keys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    public_key_hash TEXT UNIQUE NOT NULL,
+    certificate_serial TEXT NOT NULL,
+    compromise_date TEXT NOT NULL,
+    compromise_reason TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_compromised_hash ON compromised_keys(public_key_hash);
 """
 
 def init_db(db_path: str | Path) -> Path:
@@ -145,3 +154,6 @@ def get_crl_metadata(conn, ca_subject: str):
     return conn.execute(
         "SELECT * FROM crl_metadata WHERE ca_subject = ?", (ca_subject,)
     ).fetchone()
+
+def list_compromised_keys(conn):
+    return conn.execute("SELECT * FROM compromised_keys").fetchall()

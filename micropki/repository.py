@@ -9,6 +9,11 @@ from .logger import log_event
 import email.utils
 import hashlib
 import time
+import tempfile
+from .ca import RootCA
+from cryptography.hazmat.primitives import serialization
+from .ratelimit import TokenBucket
+from .audit import AuditLog
 
 logger = logging.getLogger("pki_audit")
 
@@ -16,7 +21,14 @@ HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
 PEM_CT = "application/x-pem-file"
 
 
-def make_handler(db_path: Path, cert_dir: Path):
+
+def make_handler(db_path: Path, cert_dir: Path, *, ca_private_dir: Path | None = None,
+                 ca_pass_file: Path | None = None, api_key: str | None = None,
+                 rate_limit: float = 0.0, rate_burst: int = 10,
+                 audit_log: Path | None=None):
+    ca_private_dir = ca_private_dir or cert_dir.parent / "private"
+    audit = AuditLog(audit_log or (cert_dir.parent / "audit" / "audit.log"))
+    limiter = TokenBucket(rate_limit, rate_burst)
     class Handler(BaseHTTPRequestHandler):
         server_version = "MicroPKI-Repo/1.0"
 
@@ -34,8 +46,24 @@ def make_handler(db_path: Path, cert_dir: Path):
             log_event(logger, logging.INFO,
                       f"[HTTP] {self.command} {self.path}",
                       client=self.client_address[0], status=code)
+        
+        def _check_limit(self) -> bool:
+            ip = self.client_address[0]
+            allowed, retry = limiter.allow(ip)
+            if not allowed:
+                self.send_response(429)
+                self.send_header("Retry-After", str(retry))
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                log_event(logger, logging.WARNING, "[HTTP] 429 rate limit",
+                          client=ip, path=self.path, retry_after=retry)
+                return False
+            return True
 
         def do_GET(self):
+            if not self._check_limit():
+                return
             path = urlparse(self.path).path
             if path.startswith("/certificate/"):
                 return self._cert(path[len("/certificate/"):])
@@ -98,21 +126,93 @@ def make_handler(db_path: Path, cert_dir: Path):
                       f"[HTTP] {self.command} {self.path}",
                       client=self.client_address[0], status=200)
 
-        do_POST = do_PUT = do_DELETE = do_PATCH = _method_not_allowed
+        def do_POST(self):
+            if not self._check_limit():
+              return
+            path = urlparse(self.path).path
+            if path == "/request-cert":
+                return self._request_cert(urlparse(self.path).query)
+            self._send(405, b"Method not allowed\n", "text/plain")
 
+        def _request_cert(self, query: str):
+            q = parse_qs(query)
+            template = (q.get("template", ["server"])[0])
+            if template not in ("server", "client", "code_signing"):
+                return self._send(400, b"Invalid template\n", "text/plain")
+            if api_key and self.headers.get("X-API-Key") != api_key:
+                return self._send(401, b"Unauthorized\n", "text/plain")
+            length = int(self.headers.get("Content-Length", "0"))
+            if length <= 0:
+                return self._send(400, b"Empty body\n", "text/plain")
+            csr_pem = self.rfile.read(length)
+            
+            tmp_dir = Path(tempfile.mkdtemp())
+            tmp = tmp_dir / "external.csr.pem"
+            tmp.write_bytes(csr_pem)
+            try:
+                ca = RootCA(str(cert_dir.parent), create_layout=False, audit=audit)
+                cert = ca.issue_cert(
+                    ca_cert_path=str(cert_dir / "intermediate.cert.pem"),
+                    ca_key_path=str(ca_private_dir / "intermediate.key.pem"),
+                    ca_passphrase=(ca_pass_file.read_bytes().strip()
+                                   if ca_pass_file else b"CHANGE-ME"),
+                    template=template,
+                    subject="ignored", sans=[],
+                    out_dir=str(cert_dir),
+                    validity_days=365,
+                    key_type="rsa",
+                    csr_path=str(tmp),
+                    db_path=db_path,
+                )
+            except Exception as e:
+                log_event(logger, logging.ERROR, "request-cert failed", error=str(e))
+                return self._send(400, f"CA error: {e}\n".encode(), "text/plain")
+            finally:
+                tmp.unlink(missing_ok=True)
+                try:
+                    tmp_dir.rmdir()
+                except OSError:
+                    pass
+
+            body = cert.public_bytes(serialization.Encoding.PEM)
+            log_event(logger, logging.INFO, "[HTTP] POST /request-cert",
+                      client=self.client_address[0], status=201,
+                      template=template, serial=hex(cert.serial_number))
+            self._send(201, body, "application/x-pem-file")
+
+        def do_PUT(self):
+          self._send(405, b"Method not allowed\n", "text/plain")
+
+        do_DELETE = do_PUT
+        do_PATCH = do_PUT
     return Handler
 
 
-def serve(host: str, port: int, db_path: Path, cert_dir: Path) -> None:
-    handler = make_handler(Path(db_path), Path(cert_dir))
+def serve(host: str, port: int, db_path: Path, cert_dir: Path, *,
+          ca_private_dir: Path | None = None,
+          ca_pass_file: Path | None = None,
+          api_key: str | None = None,
+          rate_limit: float = 0.0,
+          rate_burst: int = 10,
+          audit_log: Path | None=None) -> None:
+    handler = make_handler(
+        Path(db_path), Path(cert_dir),
+        ca_private_dir=Path(ca_private_dir) if ca_private_dir else None,
+        ca_pass_file=Path(ca_pass_file) if ca_pass_file else None,
+        api_key=api_key,
+        rate_limit=rate_limit,
+        rate_burst=rate_burst,
+        audit_log=Path(audit_log) if audit_log else None,
+    )
     httpd = HTTPServer((host, port), handler)
     log_event(logger, logging.INFO, "Repository server started",
-              host=host, port=port,
-              db_path=str(db_path), cert_dir=str(cert_dir))
+              host=host, port=port, db_path=str(db_path),
+              cert_dir=str(cert_dir),
+              request_cert=bool(ca_pass_file))
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
-        log_event(logger, logging.INFO, "Repository server stopped (KeyboardInterrupt)")
+        log_event(logger, logging.INFO, "Repository server stopped")
     finally:
         httpd.server_close()
 

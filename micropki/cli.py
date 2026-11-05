@@ -16,6 +16,11 @@ from .revocation import revoke_certificate
 from .crl import normalize_reason, build_and_save_crl
 from .crypto_utils import load_certificate, load_encrypted_key
 from argparse import Namespace
+from . import client as _client
+from .audit import AuditLog, verify_audit, query_audit
+from .compromise import mark_compromised
+
+DEFAULT_AUDIT = "./pki/audit/audit.log"
 
 logger = logging.getLogger("pki_audit")
 
@@ -88,6 +93,8 @@ def _build_parser() -> argparse.ArgumentParser:
                              help="Key size in bits (RSA: 4096, ECC: 384)")
     init_parser.add_argument("--log-file", type=str, default=None,
                              help="Path to log file")
+    init_parser.add_argument("--audit-log", default=None,
+                             help="Audit log path (default: ./pki/audit/audit.log)")
 
     inter_parser = ca_sub.add_parser("issue-intermediate",
                                      help="Issue an intermediate CA certificate")
@@ -111,6 +118,7 @@ def _build_parser() -> argparse.ArgumentParser:
                               help="pathLenConstraint (default: 0)")
     inter_parser.add_argument("--db-path", default=DEFAULT_DB)
     inter_parser.add_argument("--log-file", default=None)
+    inter_parser.add_argument("--audit-log", default=None)
 
     issue_parser = ca_sub.add_parser("issue-cert",
                                      help="Issue a leaf certificate from an intermediate CA")
@@ -136,6 +144,7 @@ def _build_parser() -> argparse.ArgumentParser:
                               help="Sign an external CSR instead of generating a new key pair")
     issue_parser.add_argument("--db-path", default=DEFAULT_DB)
     issue_parser.add_argument("--log-file", default=None)
+    issue_parser.add_argument("--audit-log", default=None)
 
     chain_parser = ca_sub.add_parser("verify-chain",
                                      help="Verify a certificate chain: leaf -> intermediate -> root")
@@ -172,6 +181,18 @@ def _build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--port", type=int, default=8080)
     serve_parser.add_argument("--db-path", default=DEFAULT_DB)
     serve_parser.add_argument("--cert-dir", default="./pki/certs")
+    serve_parser.add_argument("--ca-private-dir", default=None,
+                              help="Directory with intermediate.key.pem "
+                                   "(default: <cert-dir>/../private)")
+    serve_parser.add_argument("--ca-pass-file", default=None,
+                              help="Passphrase file for intermediate key; "
+                                   "required for POST /request-cert")
+    serve_parser.add_argument("--api-key", default=None,
+                              help="If set, /request-cert requires X-API-Key header")
+
+    serve_parser.add_argument("--rate-limit", type=float, default=0.0)
+    serve_parser.add_argument("--rate-burst", type=int, default=10)
+    serve_parser.add_argument("--audit-log", default=None)
     serve_parser.add_argument("--log-file", default=None)
 
     status_parser = repo_sub.add_parser("status", help="Check if repo port is open (CLI-16)")
@@ -205,6 +226,7 @@ def _build_parser() -> argparse.ArgumentParser:
     revoke_parser.add_argument("--force", action="store_true",
                                help="Skip confirmation")
     revoke_parser.add_argument("--log-file", default=None)
+    revoke_parser.add_argument("--audit-log", default=None)
 
     gencrl_parser = ca_sub.add_parser("gen-crl", help="(Re)generate a CRL")
     gencrl_parser.add_argument("--ca", required=True,
@@ -226,6 +248,7 @@ def _build_parser() -> argparse.ArgumentParser:
                                help="Passphrase file for the CA private key")
     gencrl_parser.add_argument("--db-path", default=DEFAULT_DB)
     gencrl_parser.add_argument("--log-file", default=None)
+    gencrl_parser.add_argument("--audit-log", default=None)
 
     check_parser = ca_sub.add_parser("check-revoked",
                                      help="Check whether a serial is revoked")
@@ -246,6 +269,7 @@ def _build_parser() -> argparse.ArgumentParser:
     ocsp_cert_parser.add_argument("--validity-days", type=int, default=365)
     ocsp_cert_parser.add_argument("--db-path", default=DEFAULT_DB)
     ocsp_cert_parser.add_argument("--log-file", default=None)
+    ocsp_cert_parser.add_argument("--audit-log", default=None)
 
     ocsp_parser = subparsers.add_parser("ocsp", help="OCSP responder")
     ocsp_sub = ocsp_parser.add_subparsers(dest="ocsp_command")
@@ -258,7 +282,81 @@ def _build_parser() -> argparse.ArgumentParser:
     ocsp_serve.add_argument("--responder-key", required=True)
     ocsp_serve.add_argument("--ca-cert", required=True)
     ocsp_serve.add_argument("--cache-ttl", type=int, default=60)
+    ocsp_serve.add_argument("--rate-limit", type=float, default=0.0)
+    ocsp_serve.add_argument("--rate-burst", type=int, default=10)
     ocsp_serve.add_argument("--log-file", default=None)
+
+    client_parser = subparsers.add_parser("client", help="Client operations")
+    client_sub = client_parser.add_subparsers(dest="client_command")
+
+    gencsr = client_sub.add_parser("gen-csr")
+    gencsr.add_argument("--subject", required=True)
+    gencsr.add_argument("--key-type", choices=["rsa", "ecc"], default="rsa")
+    gencsr.add_argument("--key-size", type=int, default=None)
+    gencsr.add_argument("--san", action="append", default=[])
+    gencsr.add_argument("--out-key", default="./key.pem")
+    gencsr.add_argument("--out-csr", default="./request.csr.pem")
+    gencsr.add_argument("--log-file", default=None)
+
+    reqcert = client_sub.add_parser("request-cert")
+    reqcert.add_argument("--csr", required=True)
+    reqcert.add_argument("--template", choices=["server", "client", "code_signing"],
+                         required=True)
+    reqcert.add_argument("--ca-url", required=True)
+    reqcert.add_argument("--out-cert", default="./cert.pem")
+    reqcert.add_argument("--api-key", default=None)
+    reqcert.add_argument("--log-file", default=None)
+
+    validate = client_sub.add_parser("validate")
+    validate.add_argument("--cert", required=True)
+    validate.add_argument("--untrusted", action="append", default=[])
+    validate.add_argument("--trusted", default="./pki/certs/ca.cert.pem")
+    validate.add_argument("--crl", default=None)
+    validate.add_argument("--ocsp", action="store_true")
+    validate.add_argument("--mode", choices=["chain", "full"], default="full")
+    validate.add_argument("--validation-time", default=None)
+    validate.add_argument("--format", choices=["text", "json"], default="text")
+    validate.add_argument("--log-file", default=None)
+
+    check = client_sub.add_parser("check-status")
+    check.add_argument("--cert", required=True)
+    check.add_argument("--ca-cert", required=True)
+    check.add_argument("--crl", default=None)
+    check.add_argument("--ocsp-url", default=None)
+    check.add_argument("--log-file", default=None)
+
+    audit_parser = subparsers.add_parser("audit", help="Audit log operations")
+    audit_sub = audit_parser.add_subparsers(dest="audit_command")
+
+    q = audit_sub.add_parser("query")
+    q.add_argument("--log-file", default=DEFAULT_AUDIT)
+    q.add_argument("--from", dest="from_ts", default=None)
+    q.add_argument("--to", dest="to_ts", default=None)
+    q.add_argument("--level", default=None)
+    q.add_argument("--operation", default=None)
+    q.add_argument("--serial", default=None)
+    q.add_argument("--format", choices=["table", "json", "csv"], default="table")
+    q.add_argument("--verify", action="store_true")
+
+    v = audit_sub.add_parser("verify")
+    v.add_argument("--log-file", default=DEFAULT_AUDIT)
+    v.add_argument("--chain-file", default=None)
+
+    cv = audit_sub.add_parser("ct-verify")
+    cv.add_argument("--ct-log", default="./pki/audit/ct.log")
+    cv.add_argument("serial")
+
+    comp = ca_sub.add_parser("compromise", help="Simulate key compromise")
+    comp.add_argument("--cert", required=True)
+    comp.add_argument("--reason", default="keyCompromise")
+    comp.add_argument("--force", action="store_true")
+    comp.add_argument("--ca-cert", required=True)
+    comp.add_argument("--ca-key", required=True)
+    comp.add_argument("--ca-pass-file", required=True)
+    comp.add_argument("--db-path", default=DEFAULT_DB)
+    comp.add_argument("--out-dir", default="./pki")
+    comp.add_argument("--log-file", default=None)
+    comp.add_argument("--audit-log", default=None)
 
     return parser
 
@@ -273,6 +371,8 @@ def main():
 
     try:
         logger = setup_logger(log_path=getattr(args, "log_file", None))
+        audit_path = Path(getattr(args, "audit_log", None) or DEFAULT_AUDIT)
+        audit = AuditLog(audit_path)
     except Exception as e:
         print(f"Error: failed to initialize logger: {e}", file=sys.stderr)
         sys.exit(1)
@@ -294,7 +394,7 @@ def main():
                           key_type=args.key_type, key_size=args.key_size,
                           out_dir=args.out_dir)
                 passphrase = get_passphrase(args.passphrase_file)
-                ca = RootCA(args.out_dir)
+                ca = RootCA(args.out_dir, audit=audit)
                 ca.initialize(subject=subject, key_type=args.key_type,
                               key_size=args.key_size, passphrase=passphrase,
                               validity_days=args.validity_days)
@@ -319,7 +419,7 @@ def main():
                           db_path=args.db_path)
                 root_pp = get_passphrase(args.root_pass_file)
                 inter_pp = get_passphrase(args.passphrase_file)
-                ca = RootCA(args.out_dir)
+                ca = RootCA(args.out_dir, audit=audit)
                 cert = ca.issue_intermediate(
                     root_cert_path=args.root_cert, root_key_path=args.root_key,
                     root_passphrase=root_pp, subject=subject,
@@ -345,7 +445,7 @@ def main():
                           out_dir=args.out_dir, csr=args.csr,
                           sans=args.san, db_path=args.db_path)
                 ca_pp = get_passphrase(args.ca_pass_file)
-                ca = RootCA(args.out_dir, create_layout=False)
+                ca = RootCA(args.out_dir, create_layout=False, audit=audit)
                 cert = ca.issue_cert(
                     ca_cert_path=args.ca_cert, ca_key_path=args.ca_key,
                     ca_passphrase=ca_pp, template=args.template,
@@ -368,7 +468,7 @@ def main():
                         raise ValueError(f"File not found: {p}")
                 init_db(args.db_path)
                 ca_pp = get_passphrase(args.ca_pass_file)
-                ca = RootCA(args.out_dir, create_layout=False)
+                ca = RootCA(args.out_dir, create_layout=False, audit=audit)
                 cert = ca.issue_ocsp_cert(
                     ca_cert_path=args.ca_cert, ca_key_path=args.ca_key,
                     ca_passphrase=ca_pp, subject=subject,
@@ -484,6 +584,32 @@ def main():
                           serial=args.serial)
                 sys.exit(0)
 
+            if args.ca_command == "compromise":
+                normalize_reason(args.reason)
+                if not args.force:
+                    ans = input(f"Simulate compromise of {args.cert}? [y/N] ")
+                    if ans.strip().lower() not in ("y", "yes"):
+                        print("Aborted.")
+                        sys.exit(1)
+                cert = load_certificate(Path(args.cert))
+                info = mark_compromised(db_path=args.db_path, cert=cert,
+                                        reason=args.reason)
+                audit.log("key_compromise", status="success",
+                          message="Key compromise simulated",
+                          level="AUDIT", **info)
+                ns = argparse.Namespace(
+                    ca="intermediate", next_update=7, out_file=None,
+                    out_dir=args.out_dir, cert_dir=None, private_dir=None,
+                    ca_pass_file=args.ca_pass_file, db_path=args.db_path,
+                )
+                try:
+                    _generate_crl(ns)
+                except Exception as e:
+                    log_event(logger, logging.WARNING,
+                              "Emergency CRL failed", error=str(e))
+                print(f"Compromise recorded: serial={info['serial']}")
+                sys.exit(0)
+
         if args.command == "db":
             if not getattr(args, "db_command", None):
                 parser.print_help()
@@ -501,8 +627,18 @@ def main():
                 if not Path(args.db_path).expanduser().is_file():
                     raise ValueError(f"Database not found: {args.db_path} "
                                      f"(run `db init --db-path {args.db_path}`)")
-                repo_serve(args.host, args.port, args.db_path, args.cert_dir)
+                repo_serve(
+                    args.host, args.port,
+                    Path(args.db_path), Path(args.cert_dir),
+                    ca_private_dir=Path(args.ca_private_dir) if args.ca_private_dir else None,
+                    ca_pass_file=Path(args.ca_pass_file) if args.ca_pass_file else None,
+                    api_key=args.api_key,
+                    rate_limit=args.rate_limit,
+                    rate_burst=args.rate_burst,
+                    audit_log=Path(args.audit_log) if args.audit_log else None,
+                )
                 sys.exit(0)
+
             if args.repo_command == "status":
                 running = probe_status(args.host, args.port)
                 print(f"Repository at {args.host}:{args.port} is "
@@ -524,8 +660,96 @@ def main():
                       responder_cert=Path(args.responder_cert),
                       responder_key=Path(args.responder_key),
                       ca_cert=Path(args.ca_cert),
-                      cache_ttl=args.cache_ttl)
+                      cache_ttl=args.cache_ttl,
+                      rate_limit=args.rate_limit,
+                      rate_burst=args.rate_burst)
                 sys.exit(0)
+
+        if args.command == "client":
+            if not getattr(args, "client_command", None):
+                parser.print_help()
+                sys.exit(1)
+
+            if args.client_command == "gen-csr":
+                if args.key_size is None:
+                    args.key_size = 2048 if args.key_type == "rsa" else 256
+                res = _client.gen_csr(
+                    subject=args.subject, key_type=args.key_type,
+                    key_size=args.key_size, sans=args.san,
+                    out_key=args.out_key, out_csr=args.out_csr)
+                print(f"Key:  {res['key']}")
+                print(f"CSR:  {res['csr']}")
+                sys.exit(0)
+
+            if args.client_command == "request-cert":
+                res = _client.request_cert(
+                    csr_path=args.csr, template=args.template,
+                    ca_url=args.ca_url, out_cert=args.out_cert,
+                    api_key=args.api_key)
+                print(f"Cert: {res['cert']} (serial={res['serial']})")
+                sys.exit(0)
+
+            if args.client_command == "validate":
+                res = _client.validate(
+                    cert=args.cert, untrusted=args.untrusted,
+                    trusted=args.trusted, crl=args.crl, ocsp=args.ocsp,
+                    mode=args.mode, validation_time=args.validation_time,
+                    as_json=(args.format == "json"))
+                sys.exit(0 if res["ok"] else 1)
+
+            if args.client_command == "check-status":
+                res = _client.check_status(
+                    cert=args.cert, ca_cert=args.ca_cert,
+                    crl=args.crl, ocsp_url=args.ocsp_url)
+                sys.exit(0 if res["status"] == "good" else 1)
+        
+        if args.command == "audit":
+            if not getattr(args, "audit_command", None):
+                parser.print_help()
+                sys.exit(1)
+
+            if args.audit_command == "query":
+                rows = query_audit(
+                    Path(args.log_file), from_ts=args.from_ts, to_ts=args.to_ts,
+                    level=args.level, operation=args.operation,
+                    serial=args.serial, verify=args.verify,
+                )
+                if args.format == "json":
+                    print(json.dumps(rows, indent=2))
+                elif args.format == "csv":
+                    import csv as _csv
+                    if rows:
+                        keys = sorted({k for r in rows for k in r.keys()})
+                        w = _csv.DictWriter(sys.stdout, fieldnames=keys)
+                        w.writeheader()
+                        for r in rows:
+                            w.writerow({k: json.dumps(r[k]) if isinstance(r[k], (dict, list)) else r.get(k, "") for k in keys})
+                else:
+                    for r in rows:
+                        print(f"{r.get('timestamp','')} {r.get('level','')} "
+                              f"{r.get('operation','')} {r.get('status','')} "
+                              f"{r.get('message','')}")
+                if args.verify:
+                    bad = [r for r in rows if r.get("_integrity_ok") is False]
+                    if bad:
+                        print(f"INTEGRITY FAILURE in {len(bad)} records", file=sys.stderr)
+                        sys.exit(2)
+                sys.exit(0)
+
+            if args.audit_command == "verify":
+                r = verify_audit(Path(args.log_file),
+                                 Path(args.chain_file) if args.chain_file else None)
+                if r["ok"]:
+                    print(f"OK: {r['records']} records, last={r['last_hash'][:16]}...")
+                    sys.exit(0)
+                print(f"FAIL: {r['error']}", file=sys.stderr)
+                sys.exit(1)
+
+            if args.audit_command == "ct-verify":
+                from .transparency import verify_ct
+                ok = verify_ct(Path(args.ct_log), args.serial)
+                print("in CT log" if ok else "NOT in CT log")
+                sys.exit(0 if ok else 1)
 
         parser.print_help()
         sys.exit(1)
